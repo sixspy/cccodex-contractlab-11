@@ -52,7 +52,7 @@ createApp({
     const token=ref(localStorage.getItem('contractlab_token')||'');
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({}), latches=ref({items:[],events:[]});
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
     const nav=['契约版本','入站校验','双写缓冲','契约对账'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
@@ -81,6 +81,21 @@ createApp({
       buffers.value=Array.isArray(u.items)?u.items:[];
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
+      const l=await loadJson('/api/latches'); if(l===null) return;
+      latches.value={items:Array.isArray(l.items)?l.items:[],events:Array.isArray(l.events)?l.events:[]};
+    }
+    function latchOf(version){
+      return (latches.value.items||[]).find(x=>x.contract_version===version)||null;
+    }
+    async function setLatch(version, path, on){
+      actionErr.value='';
+      const url = on
+        ? `/api/contracts/${version}/enable`
+        : `/api/contracts/${version}/disable?path=${encodeURIComponent(path)}`;
+      const r=await fetch(url,{method:'POST',headers:auth()});
+      const j=await r.json().catch(()=>({}));
+      actionErr.value=r.ok?(`门闩已${on?'解除':'落下'}：${j.detail||JSON.stringify(j)}`):(j.detail||'门闩操作失败');
+      await refresh();
     }
     async function validate(){
       actionErr.value='';
@@ -89,7 +104,7 @@ createApp({
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,latches,form,actionErr,login,logout,validate,setLatch,latchOf};
   },
   template:`
   <div v-if="!token" class="login">
@@ -109,10 +124,30 @@ createApp({
     <div class="steps"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{i+1}}. {{n}}</button></div>
     <div class="card" v-show="tab===0">
       <h2>现行契约</h2>
-      <table><thead><tr><th>版本</th><th>主题</th><th>模式 / 轨</th><th>状态</th><th>必填字段</th></tr></thead>
+      <table><thead><tr><th>版本</th><th>主题</th><th>模式 / 轨</th><th>状态</th><th>停用门闩</th><th>必填字段</th></tr></thead>
       <tbody><tr v-for="c in contracts" :key="c.id">
-        <td>{{c.version}}</td><td>{{c.subject}}</td><td>{{c.mode}} / {{c.track}}</td><td>{{c.status}}</td><td>{{c.required_fields}}</td>
+        <td>{{c.version}}</td><td>{{c.subject}}</td><td>{{c.mode}} / {{c.track}}</td>
+        <td><span class="stamp" :class="{bad:c.status==='停用'}">{{c.status}}</span></td>
+        <td>
+          <template v-if="c.track==='正式'">
+            <button class="ghost" style="margin-right:6px" @click="setLatch(c.version,'甲',false)">停用·甲（同事务拒绝）</button>
+            <button class="ghost" style="margin-right:6px" @click="setLatch(c.version,'乙',false)">停用·乙（停用缓冲）</button>
+            <button class="primary" @click="setLatch(c.version,'',true)">启用</button>
+            <div class="meta" v-if="latchOf(c.version)">
+              门闩册：{{latchOf(c.version).state}} · {{latchOf(c.version).path||'未选支'}} · 选定 {{latchOf(c.version).chosen_on}}
+            </div>
+          </template>
+          <span class="meta" v-else>影子契约不设停用门闩</span>
+        </td>
+        <td>{{c.required_fields}}</td>
       </tr></tbody></table>
+      <h2 style="margin-top:14px">门闩事件（最近）</h2>
+      <table><thead><tr><th>时间</th><th>契约</th><th>事件</th><th>说明</th></tr></thead>
+        <tbody><tr v-for="e in (latches.events||[]).slice(0,8)" :key="e.id">
+          <td>{{e.created_at}}</td><td>{{e.contract_version}}</td>
+          <td><span class="stamp" :class="{bad:e.kind.indexOf('偏了')>=0||e.kind.indexOf('争用')>=0}">{{e.kind}}</span></td>
+          <td>{{e.detail}}</td>
+        </tr></tbody></table>
     </div>
     <div class="pair" v-show="tab===1">
       <div class="card">
